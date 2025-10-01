@@ -4,7 +4,7 @@
   "type": "module",
   "dependencies": {
     "@upstash/redis": "^1.35.4",
-    "node_characterai": "^1.8.4"
+    "cainode": "github:KevinAdhaikal/CAINode"
   },
   "engines": {
     "node": ">=18"
