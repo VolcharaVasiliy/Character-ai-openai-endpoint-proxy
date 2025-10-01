@@ -3,11 +3,5 @@
     "api/v1/chat/completions.js": {
       "maxDuration": 30
     }
-  },
-  "routes": [
-    {
-      "src": "/api/v1/chat/completions",
-      "dest": "/api/v1/chat/completions.js"
-    }
-  ]
+  }
 }
