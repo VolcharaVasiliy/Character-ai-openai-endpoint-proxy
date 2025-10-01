@@ -1,0 +1,11 @@
+{
+  "name": "cai-openai-proxy",
+  "version": "1.0.0",
+  "type": "module",
+  "dependencies": {
+    "@vercel/kv": "^1.1.2"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
