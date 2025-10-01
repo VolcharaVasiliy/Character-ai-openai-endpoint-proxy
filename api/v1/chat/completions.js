@@ -1,5 +1,5 @@
 import { Redis } from '@upstash/redis';
-import { Cainode } from 'cainode';
+import CharacterAI from 'node_characterai';
 
 const redis = new Redis({
   url: process.env.UPSTASH_REDIS_REST_URL,
@@ -40,19 +40,19 @@ export default async function handler(req, res) {
   const token = authHeader.slice(7);
 
   try {
-    const client = new Cainode({ token }); // Авто-login по токену
-    await client.login(token); // Инициализация сессии (авто-куки/CSRF)
+    const client = new CharacterAI();
+    await client.authenticateWithToken(token); // Авто-login, handles CSRF/cookies
 
     const kvKey = `cai:chat:${token}:${characterExternalId}`;
     let chatId = await redis.get(kvKey);
 
-    let character;
+    let chat;
     if (!chatId) {
-      character = await client.create_character(characterExternalId); // Новый чат
-      chatId = character.chat_id; // Сохраняем для continuation
+      chat = await client.createOrContinueChat(characterExternalId); // Новый чат с историей
+      chatId = chat.externalId; // chat_id для sync
       await redis.set(kvKey, chatId, { ex: 86400 * 7 }); // Неделя
     } else {
-      character = await client.get_character(characterExternalId, chatId); // Продолжаем
+      chat = await client.continueChat(characterExternalId, chatId); // Продолжаем с историей
     }
 
     const userMessage = messages[messages.length - 1].content;
@@ -67,10 +67,10 @@ export default async function handler(req, res) {
         'Connection': 'keep-alive',
       });
 
-      const streamResponse = await character.send_message_stream(userMessage); // Stream iterator
+      const messageStream = await chat.sendMessageStream(userMessage); // Stream чанки
       let chunkCount = 0;
-      for await (const chunk of streamResponse) {
-        const textDelta = chunk.text || '';
+      messageStream.on('data', (chunk) => {
+        const textDelta = chunk.text || ''; // Delta из стрима
         if (textDelta) {
           chunkCount++;
           const sseData = {
@@ -82,13 +82,15 @@ export default async function handler(req, res) {
           };
           res.write(`data: ${JSON.stringify(sseData)}\n\n`);
         }
-      }
-      console.log('Stream chunks:', chunkCount);
-      res.write('data: [DONE]\n\n');
-      res.end();
+      });
+      messageStream.on('end', () => {
+        console.log('Stream ended, chunks:', chunkCount);
+        res.write('data: [DONE]\n\n');
+        res.end();
+      });
     } else {
-      const response = await character.send_message(userMessage); // Full response
-      const assistantText = response.text || 'No response';
+      const response = await chat.sendMessage(userMessage); // Full ответ
+      const assistantText = response.candidates?.[0]?.text || 'No response';
       res.status(200).json({
         id: Date.now().toString(),
         object: 'chat.completion',
@@ -103,10 +105,10 @@ export default async function handler(req, res) {
       });
     }
 
-    // Обнови кэш после
+    // Update кэш
     await redis.set(kvKey, chatId, { ex: 86400 * 7 });
   } catch (error) {
-    console.error('CAINode error:', error.message);
+    console.error('node_characterai error:', error.message);
     res.status(500).json({ error: error.message });
   }
 }
