@@ -11,6 +11,38 @@ const HEADERS = {
   'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
 };
 
+// Helper: Parse cookie value by name
+function parseCookie(cookiesStr, name) {
+  if (!cookiesStr) return null;
+  const cookies = cookiesStr.split(';').map(c => c.trim().split('='));
+  const cookie = cookies.find(([key]) => key === name);
+  return cookie ? cookie[1] : null;
+}
+
+// Helper: Get CSRF token (cache in Redis)
+async function getCsrfToken(token, redis) {
+  const csrfKey = `cai:csrf:${token}`;
+  let csrfToken = await redis.get(csrfKey);
+  if (!csrfToken) {
+    console.log('Fetching CSRF token...');
+    const csrfRes = await fetch(BASE_URL, {
+      method: 'GET',
+      headers: { ...HEADERS, Authorization: `Token ${token}` },
+    });
+    if (!csrfRes.ok) {
+      throw new Error(`Failed to get CSRF: ${csrfRes.status}`);
+    }
+    const setCookie = csrfRes.headers.get('set-cookie');
+    csrfToken = parseCookie(setCookie, 'csrftoken');
+    if (!csrfToken) {
+      throw new Error('No csrftoken in cookies');
+    }
+    await redis.set(csrfKey, csrfToken, { ex: 3600 }); // 1h cache
+    console.log('CSRF fetched:', !!csrfToken);
+  }
+  return csrfToken;
+}
+
 export const config = {
   api: {
     bodyParser: {
@@ -27,7 +59,7 @@ export default async function handler(req, res) {
     return res.status(405).json({ error: 'Method not allowed' });
   }
 
-  const body = req.body; // Авто-парсинг от bodyParser
+  const body = req.body;
   if (!body || typeof body !== 'object') {
     console.log('Body invalid:', typeof body);
     return res.status(400).json({ error: 'Invalid JSON body' });
@@ -40,7 +72,6 @@ export default async function handler(req, res) {
     return res.status(400).json({ error: 'Missing model or messages' });
   }
 
-  // Валидация: model должен быть string, ~30 chars (ID)
   if (typeof characterExternalId !== 'string' || characterExternalId.length < 20) {
     console.log('Invalid model:', characterExternalId);
     return res.status(400).json({ error: 'Invalid model (must be character external ID)' });
@@ -55,6 +86,10 @@ export default async function handler(req, res) {
   console.log('Auth token length:', token.length);
 
   try {
+    // Get CSRF once per token
+    const csrfToken = await getCsrfToken(token, redis);
+    const authHeaders = { ...HEADERS, Authorization: `Token ${token}`, 'X-CSRFToken': csrfToken, Cookie: `csrftoken=${csrfToken}` };
+
     const kvKey = `cai:history:${token}:${characterExternalId}`;
     console.log('KV key:', kvKey);
     let historyExternalId = await redis.get(kvKey);
@@ -64,49 +99,41 @@ export default async function handler(req, res) {
     let tgt = await redis.get(tgtKey);
     if (!tgt) {
       console.log('Fetching char info...');
-      try {
-        const infoRes = await fetch(`${BASE_URL}/chat/character/info/`, {
-          method: 'POST',
-          headers: { ...HEADERS, Authorization: `Token ${token}` },
-          body: JSON.stringify({ external_id: characterExternalId }),
-        });
-        if (!infoRes.ok) {
-          const errText = await infoRes.text();
-          console.log('Char info error:', infoRes.status, errText.slice(0, 200));
-          throw new Error(`Failed to get char info: ${infoRes.status} - ${errText}`);
-        }
-        const infoData = await infoRes.json();
-        tgt = infoData.identifier;
-        console.log('TGT fetched:', !!tgt);
-        await redis.set(tgtKey, tgt, { ex: 3600 });
-      } catch (fetchErr) {
-        console.error('Fetch char info error:', fetchErr.message);
-        throw fetchErr;
+      const infoRes = await fetch(`${BASE_URL}/chat/character/info/`, {
+        method: 'POST',
+        headers: authHeaders,
+        body: JSON.stringify({ external_id: characterExternalId }),
+      });
+      if (!infoRes.ok) {
+        let errText = await infoRes.text();
+        if (errText.length > 200) errText = errText.slice(0, 200) + '...'; // Trim HTML
+        console.log('Char info error:', infoRes.status, errText);
+        throw new Error(`Failed to get char info: ${infoRes.status} - ${errText}`);
       }
+      const infoData = await infoRes.json();
+      tgt = infoData.identifier;
+      console.log('TGT fetched:', !!tgt);
+      await redis.set(tgtKey, tgt, { ex: 3600 });
     }
 
     // Шаг 2: Создай/возобнови историю
     if (!historyExternalId) {
       console.log('Creating history...');
-      try {
-        const createRes = await fetch(`${BASE_URL}/chat/history/create/`, {
-          method: 'POST',
-          headers: { ...HEADERS, Authorization: `Token ${token}` },
-          body: JSON.stringify({ external_id: characterExternalId }),
-        });
-        if (!createRes.ok) {
-          const errText = await createRes.text();
-          console.log('History create error:', createRes.status, errText.slice(0, 200));
-          throw new Error(`Failed to create history: ${createRes.status} - ${errText}`);
-        }
-        const createData = await createRes.json();
-        historyExternalId = createData.external_id;
-        console.log('History created:', !!historyExternalId);
-        await redis.set(kvKey, historyExternalId, { ex: 86400 * 7 });
-      } catch (fetchErr) {
-        console.error('Fetch history error:', fetchErr.message);
-        throw fetchErr;
+      const createRes = await fetch(`${BASE_URL}/chat/history/create/`, {
+        method: 'POST',
+        headers: authHeaders,
+        body: JSON.stringify({ external_id: characterExternalId }),
+      });
+      if (!createRes.ok) {
+        let errText = await createRes.text();
+        if (errText.length > 200) errText = errText.slice(0, 200) + '...';
+        console.log('History create error:', createRes.status, errText);
+        throw new Error(`Failed to create history: ${createRes.status} - ${errText}`);
       }
+      const createData = await createRes.json();
+      historyExternalId = createData.external_id;
+      console.log('History created:', !!historyExternalId);
+      await redis.set(kvKey, historyExternalId, { ex: 86400 * 7 });
     }
 
     // Шаг 3: Отправь сообщение
@@ -135,15 +162,17 @@ export default async function handler(req, res) {
     const referer = `https://beta.character.ai/chat?char=${characterExternalId}`;
     console.log('Referer:', referer);
 
+    const sendHeaders = { ...authHeaders, Referer: referer };
     const sendRes = await fetch(`${BASE_URL}/chat/streaming/`, {
       method: 'POST',
-      headers: { ...HEADERS, Authorization: `Token ${token}`, Referer: referer },
+      headers: sendHeaders,
       body: JSON.stringify(payload),
     });
 
     if (!sendRes.ok) {
-      const err = await sendRes.text();
-      console.log('Send error:', sendRes.status, err.slice(0, 200));
+      let err = await sendRes.text();
+      if (err.length > 200) err = err.slice(0, 200) + '...';
+      console.log('Send error:', sendRes.status, err);
       throw new Error(`API error: ${err}`);
     }
     console.log('Send response ok:', sendRes.status);
@@ -208,7 +237,7 @@ export default async function handler(req, res) {
       });
     }
   } catch (error) {
-    console.error('Handler error:', error.message, error.stack);
+    console.error('Handler error:', error.message, error.stack?.slice(0, 500)); // Limit stack
     res.status(500).json({ error: error.message });
   }
 }
