@@ -11,38 +11,6 @@ const HEADERS = {
   'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
 };
 
-// Helper: Parse cookie value by name
-function parseCookie(cookiesStr, name) {
-  if (!cookiesStr) return null;
-  const cookies = cookiesStr.split(';').map(c => c.trim().split('='));
-  const cookie = cookies.find(([key]) => key === name);
-  return cookie ? cookie[1] : null;
-}
-
-// Helper: Get CSRF token (cache in Redis)
-async function getCsrfToken(token, redis) {
-  const csrfKey = `cai:csrf:${token}`;
-  let csrfToken = await redis.get(csrfKey);
-  if (!csrfToken) {
-    console.log('Fetching CSRF token...');
-    const csrfRes = await fetch(BASE_URL, {
-      method: 'GET',
-      headers: { ...HEADERS, Authorization: `Token ${token}` },
-    });
-    if (!csrfRes.ok) {
-      throw new Error(`Failed to get CSRF: ${csrfRes.status}`);
-    }
-    const setCookie = csrfRes.headers.get('set-cookie');
-    csrfToken = parseCookie(setCookie, 'csrftoken');
-    if (!csrfToken) {
-      throw new Error('No csrftoken in cookies');
-    }
-    await redis.set(csrfKey, csrfToken, { ex: 3600 }); // 1h cache
-    console.log('CSRF fetched:', !!csrfToken);
-  }
-  return csrfToken;
-}
-
 export const config = {
   api: {
     bodyParser: {
@@ -85,10 +53,17 @@ export default async function handler(req, res) {
   const token = authHeader.slice(7);
   console.log('Auth token length:', token.length);
 
+  // Parse auth_cookie from query
+  const urlObj = new URL(req.url, `http://${req.headers.host}`);
+  const authCookie = urlObj.searchParams.get('auth_cookie');
+  console.log('Auth cookie from query:', !!authCookie);
+
   try {
-    // Get CSRF once per token
-    const csrfToken = await getCsrfToken(token, redis);
-    const authHeaders = { ...HEADERS, Authorization: `Token ${token}`, 'X-CSRFToken': csrfToken, Cookie: `csrftoken=${csrfToken}` };
+    const authHeaders = { ...HEADERS, Authorization: `Token ${token}` };
+    if (authCookie) {
+      authHeaders.Cookie = `web-next-auth=${authCookie}`;
+      console.log('Added web-next-auth cookie');
+    }
 
     const kvKey = `cai:history:${token}:${characterExternalId}`;
     console.log('KV key:', kvKey);
@@ -106,7 +81,7 @@ export default async function handler(req, res) {
       });
       if (!infoRes.ok) {
         let errText = await infoRes.text();
-        if (errText.length > 200) errText = errText.slice(0, 200) + '...'; // Trim HTML
+        if (errText.length > 200) errText = errText.slice(0, 200) + '...';
         console.log('Char info error:', infoRes.status, errText);
         throw new Error(`Failed to get char info: ${infoRes.status} - ${errText}`);
       }
@@ -237,7 +212,7 @@ export default async function handler(req, res) {
       });
     }
   } catch (error) {
-    console.error('Handler error:', error.message, error.stack?.slice(0, 500)); // Limit stack
+    console.error('Handler error:', error.message);
     res.status(500).json({ error: error.message });
   }
 }
