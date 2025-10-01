@@ -3,5 +3,11 @@
     "api/v1/chat/completions.js": {
       "maxDuration": 30
     }
-  }
+  },
+  "rewrites": [
+    {
+      "source": "/api/v1/chat/completions",
+      "destination": "/api/v1/chat/completions"
+    }
+  ]
 }
