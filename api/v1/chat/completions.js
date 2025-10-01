@@ -20,21 +20,19 @@ export const config = {
 };
 
 export default async function handler(req, res) {
-  console.log('Handler started: Method', req.method, 'URL', req.url); // Debug: запрос дошёл
+  console.log('Handler started: Method', req.method, 'URL', req.url);
 
   if (req.method !== 'POST') {
     console.log('Method not POST');
     return res.status(405).json({ error: 'Method not allowed' });
   }
 
-  let body;
-  try {
-    body = await req.json();
-  } catch (e) {
-    console.log('Body parse error:', e.message);
+  const body = req.body; // Авто-парсинг от bodyParser
+  if (!body || typeof body !== 'object') {
+    console.log('Body invalid:', typeof body);
     return res.status(400).json({ error: 'Invalid JSON body' });
   }
-  console.log('Body parsed:', { model: body.model?.slice(0, 20) + '...', messagesCount: body.messages?.length || 0, stream: body.stream }); // Sanitized log
+  console.log('Body parsed:', { model: body.model?.slice(0, 20) + '...', messagesCount: body.messages?.length || 0, stream: body.stream });
 
   const { model: characterExternalId, messages, stream = false } = body;
   if (!characterExternalId || !messages || !Array.isArray(messages)) {
@@ -54,7 +52,7 @@ export default async function handler(req, res) {
     return res.status(401).json({ error: 'Invalid token' });
   }
   const token = authHeader.slice(7);
-  console.log('Auth token length:', token.length); // Не full token в log
+  console.log('Auth token length:', token.length);
 
   try {
     const kvKey = `cai:history:${token}:${characterExternalId}`;
@@ -74,7 +72,7 @@ export default async function handler(req, res) {
         });
         if (!infoRes.ok) {
           const errText = await infoRes.text();
-          console.log('Char info error:', infoRes.status, errText);
+          console.log('Char info error:', infoRes.status, errText.slice(0, 200));
           throw new Error(`Failed to get char info: ${infoRes.status} - ${errText}`);
         }
         const infoData = await infoRes.json();
@@ -98,7 +96,7 @@ export default async function handler(req, res) {
         });
         if (!createRes.ok) {
           const errText = await createRes.text();
-          console.log('History create error:', createRes.status, errText);
+          console.log('History create error:', createRes.status, errText.slice(0, 200));
           throw new Error(`Failed to create history: ${createRes.status} - ${errText}`);
         }
         const createData = await createRes.json();
@@ -113,6 +111,10 @@ export default async function handler(req, res) {
 
     // Шаг 3: Отправь сообщение
     const userMessage = messages[messages.length - 1].content;
+    if (!userMessage || typeof userMessage !== 'string') {
+      console.log('Invalid user message');
+      return res.status(400).json({ error: 'Invalid user message' });
+    }
     console.log('User message length:', userMessage.length);
     const payload = {
       history_external_id: historyExternalId,
@@ -131,7 +133,7 @@ export default async function handler(req, res) {
     console.log('Payload ready, sending...');
 
     const referer = `https://beta.character.ai/chat?char=${characterExternalId}`;
-    console.log('Referer:', referer); // Проверим на /pipeline
+    console.log('Referer:', referer);
 
     const sendRes = await fetch(`${BASE_URL}/chat/streaming/`, {
       method: 'POST',
@@ -141,7 +143,7 @@ export default async function handler(req, res) {
 
     if (!sendRes.ok) {
       const err = await sendRes.text();
-      console.log('Send error:', sendRes.status, err);
+      console.log('Send error:', sendRes.status, err.slice(0, 200));
       throw new Error(`API error: ${err}`);
     }
     console.log('Send response ok:', sendRes.status);
@@ -179,7 +181,7 @@ export default async function handler(req, res) {
               };
               res.write(`data: ${JSON.stringify(sseData)}\n\n`);
             } catch (parseErr) {
-              console.log('Chunk parse error:', parseErr.message, 'Line:', line.slice(0, 100)); // Debug chunk
+              console.log('Chunk parse error:', parseErr.message, 'Line preview:', line.slice(0, 100));
             }
           }
         }
@@ -206,7 +208,7 @@ export default async function handler(req, res) {
       });
     }
   } catch (error) {
-    console.error('Handler error:', error.message, error.stack); // Full stack для debug
+    console.error('Handler error:', error.message, error.stack);
     res.status(500).json({ error: error.message });
   }
 }
