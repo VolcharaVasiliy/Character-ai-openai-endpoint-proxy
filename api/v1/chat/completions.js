@@ -1,4 +1,9 @@
-import { kv } from '@vercel/kv';
+import { Redis } from '@upstash/redis';
+
+const redis = new Redis({
+  url: process.env.UPSTASH_REDIS_REST_URL,
+  token: process.env.UPSTASH_REDIS_REST_TOKEN,
+});
 
 const BASE_URL = 'https://beta.character.ai';
 const HEADERS = {
@@ -32,11 +37,11 @@ export default async function handler(req, res) {
 
   try {
     const kvKey = `cai:history:${token}:${characterExternalId}`;
-    let historyExternalId = await kv.get(kvKey);
+    let historyExternalId = await redis.get(kvKey);
 
-    // Шаг 1: Получи tgt (identifier) из char info, если нет в KV
+    // Шаг 1: Получи tgt (identifier) из char info, если нет в Redis
     const tgtKey = `cai:tgt:${token}:${characterExternalId}`;
-    let tgt = await kv.get(tgtKey);
+    let tgt = await redis.get(tgtKey);
     if (!tgt) {
       const infoRes = await fetch(`${BASE_URL}/chat/character/info/`, {
         method: 'POST',
@@ -46,7 +51,7 @@ export default async function handler(req, res) {
       if (!infoRes.ok) throw new Error('Failed to get char info');
       const infoData = await infoRes.json();
       tgt = infoData.identifier;
-      await kv.set(tgtKey, tgt, { ex: 3600 }); // Кэш на час
+      await redis.set(tgtKey, tgt, { ex: 3600 }); // Кэш на час
     }
 
     // Шаг 2: Создай/возобнови историю чата, если нет
@@ -59,7 +64,7 @@ export default async function handler(req, res) {
       if (!createRes.ok) throw new Error('Failed to create history');
       const createData = await createRes.json();
       historyExternalId = createData.external_id;
-      await kv.set(kvKey, historyExternalId, { ex: 86400 * 7 }); // Кэш на неделю
+      await redis.set(kvKey, historyExternalId, { ex: 86400 * 7 }); // Кэш на неделю
     }
 
     // Шаг 3: Отправь сообщение (последнее из messages — user input)
